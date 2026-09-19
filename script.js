@@ -698,26 +698,23 @@ ${grade === 5 ? g5Example : g4Example}
 Replace example JSON with actual results including real mistakes and personalized practice problems.`;
 }
 
-// ── API Key management ──
-const KEY_STORAGE = 'mathbuddy_apikey';
+// ── Tutor endpoint ──
+// Requests go to our own Cloudflare Worker, which holds the Anthropic API key.
+// No key is ever sent to, or stored in, the browser.
+const API_URL = (window.STUDY_BUDDY_API || 'https://study-buddy-api.leif-jackson.workers.dev')
+  .replace(/\/+$/, '') + '/v1/messages';
+
+function tutorRequest(payload) {
+  return fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
 const USERS_STORAGE = 'mathbuddy_users';
 const SESSION_STORAGE = 'mathbuddy_session';
 
-function getApiKey() {
-  // Prefer key baked in at deploy time (via GitHub Actions secret)
-  if (window.MATHBUDDY_KEY && window.MATHBUDDY_KEY.startsWith('sk-')) {
-    return window.MATHBUDDY_KEY;
-  }
-  return localStorage.getItem(KEY_STORAGE) || '';
-}
-
-function saveApiKey(key) {
-  localStorage.setItem(KEY_STORAGE, key.trim());
-}
-
-function clearApiKey() {
-  localStorage.removeItem(KEY_STORAGE);
-}
 
 // ── User management ──
 function getUsers() {
@@ -822,7 +819,6 @@ let testSecondsLeft = 0;
 let currentMode = 'homework'; // 'homework' or 'test'
 
 // ── DOM refs ──
-const keyScreen = document.getElementById('key-screen');
 const loginScreen = document.getElementById('login-screen');
 const setupScreen = document.getElementById('setup-screen');
 const chatScreen = document.getElementById('chat-screen');
@@ -833,9 +829,6 @@ const leaderboardScreen = document.getElementById('leaderboard-screen');
 const studentPickerScreen = document.getElementById('student-picker-screen');
 const addStudentScreen = document.getElementById('add-student-screen');
 
-const apiKeyInput = document.getElementById('api-key-input');
-const saveKeyBtn = document.getElementById('save-key-btn');
-const changeKeyBtn = document.getElementById('change-key-btn');
 const moduleSelect = document.getElementById('module-select');
 const lessonInput = document.getElementById('lesson-input');
 const startBtn = document.getElementById('start-btn');
@@ -880,7 +873,7 @@ const forgotPasswordScreen = document.getElementById('forgot-password-screen');
 const pinPadScreen = document.getElementById('pin-pad-screen');
 const studentLoginScreen = document.getElementById('student-login-screen');
 
-const ALL_SCREENS = [keyScreen, loginScreen, forgotPasswordScreen, pinPadScreen, studentLoginScreen, studentPickerScreen, addStudentScreen, setupScreen, chatScreen, testScreen, reportScreen, profileScreen, leaderboardScreen].filter(Boolean);
+const ALL_SCREENS = [loginScreen, forgotPasswordScreen, pinPadScreen, studentLoginScreen, studentPickerScreen, addStudentScreen, setupScreen, chatScreen, testScreen, reportScreen, profileScreen, leaderboardScreen].filter(Boolean);
 
 // ── Screen helper ──
 function showScreen(screen) {
@@ -895,56 +888,8 @@ function showScreen(screen) {
   }
 }
 
-// ── Startup ──
-(function init() {
-  // Hide "Change API Key" button if key is baked in at deploy time
-  if (window.MATHBUDDY_KEY && window.MATHBUDDY_KEY.startsWith('sk-')) {
-    const changeKeyRow = document.querySelector('.change-key-row');
-    if (changeKeyRow) changeKeyRow.style.display = 'none';
-  }
+// (startup runs at the very end of this file so every const above is initialized)
 
-  // Netflix-style: check for a student in session first
-  const user = getCurrentUser();
-  if (user && !user.isParent) {
-    setupStudentHeader(user);
-    showScreen(setupScreen);
-    return;
-  }
-
-  // Check if there are any children stored on this device
-  const children = getAllChildren();
-  if (children.length > 0) {
-    // Show the Netflix-style picker — no parent login needed
-    renderStudentPickerNetflix(children);
-    showScreen(studentPickerScreen);
-    return;
-  }
-
-  // No children yet — check Supabase session first, fall back to legacy
-  const auth = getSupabaseAuth();
-  if (auth) {
-    auth.getSession().then(({ data: { session } }) => {
-      if (session) {
-        handleSupabaseSession(session);
-      } else {
-        // Listen for OAuth redirects (returning from Google/Apple)
-        auth.onAuthStateChange((event, sess) => {
-          if (event === 'SIGNED_IN' && sess) handleSupabaseSession(sess);
-        });
-        showScreen(loginScreen);
-      }
-    });
-  } else {
-    // No Supabase — check legacy parent session or show login
-    if (user && user.isParent) {
-      _parentAuthed = true;
-      renderStudentPickerNetflix([]);
-      showScreen(studentPickerScreen);
-    } else {
-      showScreen(loginScreen);
-    }
-  }
-})();
 
 function handleSupabaseSession(session) {
   const sbUser = session.user;
@@ -1006,33 +951,6 @@ function renderStudentPickerNetflix(children) {
       '</div>';
   }).join('');
 }
-
-// ── Key screen ──
-saveKeyBtn.addEventListener('click', () => {
-  const key = apiKeyInput.value.trim();
-  if (!key.startsWith('sk-')) {
-    alert('That doesn\'t look like a valid API key. It should start with "sk-".');
-    return;
-  }
-  saveApiKey(key);
-  apiKeyInput.value = '';
-  const user = getCurrentUser();
-  if (user) {
-    setupStudentHeader(user);
-    showScreen(setupScreen);
-  } else {
-    showScreen(loginScreen);
-  }
-});
-
-apiKeyInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter') saveKeyBtn.click();
-});
-
-changeKeyBtn.addEventListener('click', () => {
-  clearApiKey();
-  showScreen(keyScreen);
-});
 
 // ── Login screen ──
 // Twemoji SVG animal faces — forward-facing cartoon animals
@@ -2288,7 +2206,7 @@ clearPhotoBtn.addEventListener('click', () => {
 startBtn.addEventListener('click', startSession);
 
 function startSession() {
-  if (!getApiKey()) { showScreen(keyScreen); return; }
+
 
   const topicHint = (document.getElementById('topic-hint-input') || {}).value || '';
   selectedModule = null;
@@ -2430,33 +2348,17 @@ function sendMessage() {
 
 // ── Direct Anthropic API streaming (homework) ──
 async function streamToAnthropic(messages, isImageRequest) {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    appendBuddyMessage("Oops! I can't find your API key. Let me take you back to set it up.");
-    setTimeout(() => { clearApiKey(); showScreen(keyScreen); }, 1500);
-    return;
-  }
-
   isStreaming = true;
   sendBtn.disabled = true;
   const typingEl = appendTypingIndicator(chatMessages);
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1024,
-        stream: true,
-        system: buildSystemPrompt(selectedModule, selectedLesson, selectedGrade, (document.getElementById('topic-hint-input') || {}).value || ''),
-        messages,
-      }),
+    const response = await tutorRequest({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      stream: true,
+      system: buildSystemPrompt(selectedModule, selectedLesson, selectedGrade, (document.getElementById('topic-hint-input') || {}).value || ''),
+      messages,
     });
 
     typingEl.remove();
@@ -2464,8 +2366,7 @@ async function streamToAnthropic(messages, isImageRequest) {
     if (!response.ok) {
       const errBody = await response.json().catch(() => ({}));
       if (response.status === 401) {
-        appendBuddyMessage("❌ That API key doesn't seem to work. Let me take you back to fix it.");
-        setTimeout(() => { clearApiKey(); showScreen(keyScreen); }, 1800);
+        appendBuddyMessage("❌ Math Buddy couldn't connect. Please ask a parent to check the setup.");
       } else {
         appendBuddyMessage(`Hmm, something went wrong (${response.status}: ${errBody.error?.message || 'unknown error'}). Please try again!`);
       }
@@ -2570,7 +2471,7 @@ function stopTestTimer() {
 let currentTestSkills = [];
 
 function startTestMode() {
-  if (!getApiKey()) { showScreen(keyScreen); return; }
+
   const user = getCurrentUser();
   const grade = user ? (user.grade || 4) : selectedGrade || 4;
   const gradeLabel = String(grade) === 'K' ? 'Kindergarten' : `Grade ${grade}`;
@@ -2698,12 +2599,6 @@ function sendTestMessage() {
 }
 
 async function streamTestToAnthropic(messages) {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    appendTestBuddyMessage("Oops! I can't find your API key.");
-    return;
-  }
-
   const user = getCurrentUser();
   const grade = user ? (user.grade || 4) : selectedGrade || 4;
 
@@ -2713,21 +2608,12 @@ async function streamTestToAnthropic(messages) {
   const typingEl = appendTypingIndicator(testMessages);
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 2048,
-        stream: true,
-        system: buildTestSystemPrompt(grade, currentTestSkills.length > 0 ? currentTestSkills : null),
-        messages,
-      }),
+    const response = await tutorRequest({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      stream: true,
+      system: buildTestSystemPrompt(grade, currentTestSkills.length > 0 ? currentTestSkills : null),
+      messages,
     });
 
     typingEl.remove();
@@ -2831,9 +2717,6 @@ async function streamTestToAnthropic(messages) {
 }
 
 async function generateReportCardNow() {
-  const apiKey = getApiKey();
-  if (!apiKey) return;
-
   const user = getCurrentUser();
   const grade = user ? (user.grade || 4) : selectedGrade || 4;
 
@@ -2871,21 +2754,12 @@ Rules:
     ];
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 1024,
-          stream: false,
-          system: reportSystemPrompt,
-          messages,
-        }),
+      const response = await tutorRequest({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        stream: false,
+        system: reportSystemPrompt,
+        messages,
       });
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}));
@@ -2922,21 +2796,12 @@ Rules:
   const messages = [...testConversationHistory, { role: 'user', content: finishMsg }];
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 2048,
-        stream: false,
-        system: buildTestSystemPrompt(grade),
-        messages,
-      }),
+    const response = await tutorRequest({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      stream: false,
+      system: buildTestSystemPrompt(grade),
+      messages,
     });
 
     if (!response.ok) {
@@ -3473,3 +3338,48 @@ function initVoiceInput(textareaId, btnId) {
 
 initVoiceInput('chat-input', 'voice-btn');
 initVoiceInput('test-input', 'test-voice-btn');
+
+// ── Startup (runs last: all consts and functions above are now initialized) ──
+(function init() {
+  // Netflix-style: check for a student in session first
+  const user = getCurrentUser();
+  if (user && !user.isParent) {
+    setupStudentHeader(user);
+    showScreen(setupScreen);
+    return;
+  }
+
+  // Check if there are any children stored on this device
+  const children = getAllChildren();
+  if (children.length > 0) {
+    // Show the Netflix-style picker — no parent login needed
+    renderStudentPickerNetflix(children);
+    showScreen(studentPickerScreen);
+    return;
+  }
+
+  // No children yet — check Supabase session first, fall back to legacy
+  const auth = getSupabaseAuth();
+  if (auth) {
+    auth.getSession().then(({ data: { session } }) => {
+      if (session) {
+        handleSupabaseSession(session);
+      } else {
+        // Listen for OAuth redirects (returning from Google/Apple)
+        auth.onAuthStateChange((event, sess) => {
+          if (event === 'SIGNED_IN' && sess) handleSupabaseSession(sess);
+        });
+        showScreen(loginScreen);
+      }
+    });
+  } else {
+    // No Supabase — check legacy parent session or show login
+    if (user && user.isParent) {
+      _parentAuthed = true;
+      renderStudentPickerNetflix([]);
+      showScreen(studentPickerScreen);
+    } else {
+      showScreen(loginScreen);
+    }
+  }
+})();
